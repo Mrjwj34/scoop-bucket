@@ -1,0 +1,77 @@
+name: update
+
+# Keeps this bucket in step with berth's releases without anyone touching it.
+on:
+  schedule:
+    - cron: '23 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Render the manifest from the latest release
+        run: |
+          python3 - <<'PY'
+          import json, pathlib, urllib.request
+
+          homepage = "https://github.com/Mrjwj34/berth"
+          release = json.loads(urllib.request.urlopen(
+              f"https://api.github.com/repos/Mrjwj34/berth/releases/latest").read())
+          tag = release["tag_name"]
+          version = tag.lstrip("v")
+          checksums = urllib.request.urlopen(
+              f"https://github.com/Mrjwj34/berth/releases/download/{tag}/checksums.txt").read().decode()
+
+          sums = {}
+          for line in checksums.splitlines():
+              parts = line.split()
+              if len(parts) == 2:
+                  sums[parts[1].lstrip("*")] = parts[0].lower()
+
+          def url(arch):
+              return f"{homepage}/releases/download/{tag}/berth_{version}_windows_{arch}.zip"
+
+          for arch in ("amd64", "arm64"):
+              if f"berth_{version}_windows_{arch}.zip" not in sums:
+                  raise SystemExit(f"missing windows asset for {arch} in {tag}")
+
+          manifest = {
+              "version": version,
+              "description": "Fast, daemonless local workspaces for parallel coding agents",
+              "homepage": homepage,
+              "license": "MIT",
+              "architecture": {
+                  "64bit": {"url": url("amd64"), "hash": sums[f"berth_{version}_windows_amd64.zip"]},
+                  "arm64": {"url": url("arm64"), "hash": sums[f"berth_{version}_windows_arm64.zip"]},
+              },
+              "bin": "berth.exe",
+              "checkver": {"github": homepage},
+              "autoupdate": {
+                  "architecture": {
+                      "64bit": {"url": f"{homepage}/releases/download/v$version/berth_$version_windows_amd64.zip"},
+                      "arm64": {"url": f"{homepage}/releases/download/v$version/berth_$version_windows_arm64.zip"},
+                  }
+              },
+          }
+          pathlib.Path("bucket/berth.json").write_text(json.dumps(manifest, indent=4) + "\n", encoding="utf-8")
+          print(f"rendered berth {version}")
+          PY
+
+      - name: Commit when the manifest changed
+        run: |
+          if git diff --quiet; then
+            echo "already current"
+            exit 0
+          fi
+          version=$(python3 -c "import json;print(json.load(open('bucket/berth.json'))['version'])")
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bucket/berth.json
+          git commit -m "berth ${version}"
+          git push
